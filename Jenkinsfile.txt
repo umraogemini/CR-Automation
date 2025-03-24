@@ -1,0 +1,113 @@
+pipeline {
+    agent any
+
+    environment {
+        JIRA_API = "https://your-jira-instance/rest/api/2/issue"
+        SERVICENOW_API = "https://your-instance.service-now.com/api/now/table/change_request"
+        JIRA_TOKEN = credentials('jira-token')
+        SERVICENOW_TOKEN = credentials('servicenow-token')
+    }
+
+    triggers {
+        githubPush()  // This listens for GitHub commits
+    }
+
+    stages {
+        stage('Clone Repository') {
+            steps {
+                git branch: 'main', url: 'https://github.com/your-repo.git'
+            }
+        }
+
+        stage('Create CR in Jira') {
+            steps {
+                script {
+                    def jiraResponse = sh(script: """
+                        curl -X POST "$JIRA_API" \
+                        -H "Content-Type: application/json" \
+                        -H "Authorization: Bearer $JIRA_TOKEN" \
+                        -d '{
+                            "fields": {
+                                "project": { "key": "CR_PROJECT" },
+                                "summary": "Automated CR for Deployment",
+                                "description": "Change Request triggered by GitHub Commit",
+                                "issuetype": { "name": "Change Request" }
+                            }
+                        }'
+                    """, returnStdout: true).trim()
+
+                    echo "Jira CR Created: ${jiraResponse}"
+                }
+            }
+        }
+
+        stage('Sync CR to ServiceNow') {
+            steps {
+                script {
+                    sh """
+                        curl -X POST "$SERVICENOW_API" \
+                        -H "Content-Type: application/json" \
+                        -H "Authorization: Bearer $SERVICENOW_TOKEN" \
+                        -d '{
+                            "short_description": "CR Created from GitHub Commit",
+                            "category": "Software Deployment",
+                            "risk": "Low",
+                            "state": "New"
+                        }'
+                    """
+                }
+            }
+        }
+
+        stage('Auto-Approve CR') {
+            steps {
+                script {
+                    def autoApprovalCriteriaMet = true
+
+                    if (autoApprovalCriteriaMet) {
+                        sh """
+                            curl -X PATCH "$SERVICENOW_API/CR_ID" \
+                            -H "Content-Type: application/json" \
+                            -H "Authorization: Bearer $SERVICENOW_TOKEN" \
+                            -d '{ "state": "Approved" }'
+                        """
+                        echo "CR Approved Automatically"
+                    } else {
+                        echo "CR Requires Manual Approval"
+                    }
+                }
+            }
+        }
+
+        stage('Deploy Application') {
+            when {
+                expression { autoApprovalCriteriaMet }
+            }
+            steps {
+                echo "Deploying application..."
+            }
+        }
+
+        stage('Update Jira Status') {
+            steps {
+                sh """
+                    curl -X PUT "$JIRA_API/CR_ID" \
+                    -H "Content-Type: application/json" \
+                    -H "Authorization: Bearer $JIRA_TOKEN" \
+                    -d '{ "fields": { "status": "Approved" } }'
+                """
+                echo "Jira CR Status Updated"
+            }
+        }
+
+        stage('Notify Teams') {
+            steps {
+                sh """
+                    curl -X POST "https://hooks.slack.com/services/your-webhook-url" \
+                    -H "Content-Type: application/json" \
+                    -d '{ "text": "CR Approved & Deployment Started 🚀" }'
+                """
+            }
+        }
+    }
+}
